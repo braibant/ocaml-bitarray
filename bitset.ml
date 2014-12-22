@@ -1,82 +1,123 @@
 (** A Bit array (also known as bitmap, bitset, bit string or bit
     vector) is a specialized array data structure. *)
-
 module Make (E : sig type t end) = struct
 
-  type descr =
-    {
-      tag: string;
-      mutable fields: field list;
-      mutable length: int;
-      mutable sealed: bool
-    }
-  and field =
-    {
-      label: string option;
-      element: E.t;
-      index: int;
-    }
-  and t =
-    {
-      content: Bitv.t;
-      descr: descr
-    }
+  (* There is a balance to stike between having more information in
+     the ['a element] type -- the actual value, the index in the
+     bitset and the label -- or more information in the ['a descr].
 
-  type elt = field
+     As an implementation choice, we choose to have less information
+     in the ['a elements] and more in the ['a descr]. We allocate one
+     array for element' labels, one for element contents in ['a descr].
+
+*)
+  type 'a descr =
+      {
+        tag: string;
+        mutable sealed: bool;
+
+        (* we ensure the following invariant:
+           - Array.length labels = Array.length contents
+           - if sealed
+             then Array.length labels = size
+             else size <= Array.length labels
+        *)
+        mutable labels: string option array;
+        mutable contents: E.t array;
+        mutable size: int;
+      }
+  and 'a element = int
+  and 'a t =
+      {
+        content: Bitv.t;
+        descr: 'a descr
+      }
 
   exception Modifying_sealed_set of string
 
   let declare tag =
     {
-      tag; fields = []; length = 0; sealed = false
+      tag;
+      sealed = false;
+      labels = [||];
+      contents = [||];
+      size = 0;
     }
 
-  let field descr ?label element =
+  let element descr ?label element =
     if descr.sealed
     then raise (Modifying_sealed_set descr.tag);
 
-    let f =
-      {
-        label;
-        element;
-        index = descr.length;
-      }
-    in
-    descr.fields <- f :: descr.fields;
-    descr.length <- succ descr.length;
-    f
+    if descr.size < Array.length descr.contents
+    then
+      begin
+        let size = descr.size in
+        descr.contents.(size) <- element;
+        descr.labels.(size) <- label;
+        descr.size <- size + 1;
+        size
+      end
+    else
+      begin
+        let size = descr.size in
+        assert (size = Array.length descr.contents);
+        let n = max 64 (2 * size) in
+        (* allocate new storage *)
+        let contents = Array.make n element in
+        let labels = Array.make n label in
+        (* copy existing values into the new storage *)
+        Array.blit descr.contents 0 contents 0 size;
+        Array.blit descr.labels   0 labels 0 size;
+        (* update descr *)
+        descr.contents <- contents;
+        descr.labels <- labels;
+        descr.size <- size + 1;
+        size
+      end
 
   let seal descr =
     if descr.sealed
     then raise (Modifying_sealed_set descr.tag);
 
     descr.sealed <- true;
-    descr.fields <- List.rev descr.fields;
+    descr.contents <- Array.sub descr.contents 0 descr.size;
+    descr.labels <- Array.sub descr.labels 0 descr.size;
     ()
+
+  let tag descr = descr.tag
+  let size descr = descr.size
 
   (** {2 Constructors and accessors for sets.}  *)
 
   let create descr b =
-    let content = Bitv.create descr.length b in
+    let content = Bitv.create descr.size b in
     {
       content;
       descr
     }
 
   let descr t = t.descr
-  let tag t = t.descr.tag
-  let length t = t.descr.length
+  let cardinal t =
+    let r = ref 0 in
+    Bitv.iteri_true (fun _ -> incr r) t.content;
+    !r
 
-  (** {2 Accessors for fields.}  *)
-  let element field = field.element
-  let label field = field.label
+  let elements t =
+    let r = ref [] in
+    let contents = t.descr.contents in
+    Bitv.iteri_true (fun i -> r := contents.(i) :: !r) t.content;
+    List.rev !r
+
+  (** {2 Accessors for fields.} *)
+  let element descr field = descr.contents.(field)
+  let label descr field = descr.labels.(field)
 
   (** {2 Imperative operations on sets.}  *)
   let set t elt b =
-    Bitv.set t.content elt.index b
+    Bitv.set t.content elt b
 
   let get t elt =
-    Bitv.get t.content elt.index
+    Bitv.get t.content elt
 
   let copy t =
     {content = Bitv.copy t.content; descr = t.descr}
@@ -86,16 +127,16 @@ module Make (E : sig type t end) = struct
 
   let add t elt =
     let content =  Bitv.copy t.content in
-    Bitv.set t.content elt.index true;
+    Bitv.set t.content elt true;
     {t with content}
 
   let remove t elt =
     let content =  Bitv.copy t.content in
-    Bitv.set t.content elt.index true;
+    Bitv.set t.content elt true;
     {t with content}
 
   let mem t elt =
-    Bitv.get t.content elt.index
+    Bitv.get t.content elt
 
   let union a b =
     assert (a.descr == b.descr);
@@ -121,7 +162,6 @@ module Make (E : sig type t end) = struct
       descr = a.descr
     }
 
-
   let is_empty t =
     Bitv.all_zeros t.content
 
@@ -138,22 +178,13 @@ module Make (E : sig type t end) = struct
     equal (inter a b) a
 
   let iter f t =
-    List.iteri
-      (fun i field ->
-         if Bitv.get t.content i
-         then f field
-         else ()
-      ) t.descr.fields
+    let contents = t.descr.contents in
+    Bitv.iteri_true (fun i -> f contents.(i)) t.content
 
   let fold f t acc =
     let r = ref acc in
-    List.iteri
-      (fun i field ->
-         if Bitv.get t.content i
-         then r := f field !r
-         else ()
-      ) t.descr.fields;
+    let contents = t.descr.contents in
+    Bitv.iteri_true (fun i -> r := f contents.(i) !r) t.content;
     !r
 
-  let count t = Bitv.pop t.content
 end
