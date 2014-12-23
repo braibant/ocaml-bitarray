@@ -187,4 +187,6 @@ module Make (E : sig type t end) = struct
     Bitv.iteri_true (fun i -> r := f contents.(i) !r) t.content;
     !r
 
+  external element_of_int  : int -> 'universe element = "%identity"
+  external int_of_element  : 'universe element -> int = "%identity"
 end

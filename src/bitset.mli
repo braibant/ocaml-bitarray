@@ -75,5 +75,7 @@ module Make (E : sig type t end) : sig
   val iter: (E.t -> unit) -> 'universe t -> unit
   val fold: (E.t -> 'a -> 'a) -> 'universe t -> 'a -> 'a
 
-  (** Population count, i.e., number of elements.  *)
+  (** {2 Unsafe operations}  *)
+  val element_of_int: int -> 'universe element
+  val int_of_element: 'universe element -> int
 end
